@@ -25,6 +25,7 @@
 #include <cmath>
 #include <iostream>
 #include <fstream>
+#include <cerrno>
 #include "libgambit/libgambit.h"
 
 #include "nfgame.h"
@@ -57,8 +58,8 @@ void PrintBanner(std::ostream &p_stream)
 void PrintHelp(char *progname)
 {
   PrintBanner(std::cerr);
-  std::cerr << "Usage: " << progname << " [OPTIONS]\n";
-  std::cerr << "Accepts game on standard input.\n";
+  std::cerr << "Usage: " << progname << " [OPTIONS] [file]\n";
+  std::cerr << "If file is not specified, attempts to read game from standard input.\n";
 
   std::cerr << "Options:\n";
   std::cerr << "  -d DECIMALS      show equilibria as floating point with DECIMALS digits\n";
@@ -157,11 +158,22 @@ int main(int argc, char *argv[])
     PrintBanner(std::cerr);
   }
 
-  try {
-    Gambit::Game game = Gambit::ReadGame(std::cin);
+  std::istream* input_stream = &std::cin;
+  std::ifstream file_stream;
+  if (optind < argc) {
+    file_stream.open(argv[optind]);
+    if (!file_stream.is_open()) {
+      std::ostringstream error_message;
+      error_message << argv[0] << ": " << argv[optind];
+      perror(error_message.str().c_str());
+      exit(1);
+    }
+    input_stream = &file_stream;
+  }
 
-    game->BuildComputedValues();
-    
+  try {
+    Gambit::Game game = Gambit::ReadGame(*input_stream);
+
     Gambit::Array<double> pert(game->MixedProfileLength());
     for (int i = 1; i <= pert.Length(); i++) {
       pert[i] = 1.0;

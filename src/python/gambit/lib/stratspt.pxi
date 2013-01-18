@@ -13,7 +13,7 @@ cdef class StrategySupportProfile(Collection):
        self.support = (<c_StrategySupport *>0)  
        if self.is_valid(strategies, len(game.players)):
             temp_restriction = <StrategicRestriction>game.mixed_profile().restriction()
-            self.support = copy_StrategySupport(deref(temp_restriction.support))
+            self.support = new c_StrategySupport(deref(temp_restriction.support))
             for strategy in game.strategies:
                 if strategy not in strategies:
                     self.support.RemoveStrategy((<Strategy>strategy).strategy)
@@ -21,7 +21,7 @@ cdef class StrategySupportProfile(Collection):
             raise ValueError("invalid set of strategies")
     def __dealloc__(self):
         if self.support != (<c_StrategySupport *>0):
-            del_StrategySupport(self.support)
+            del self.support
     def __len__(self):    return self.support.MixedProfileLength()
     def __richcmp__(StrategySupportProfile self, other, whichop):
         if isinstance(other, StrategySupportProfile):
@@ -45,7 +45,7 @@ cdef class StrategySupportProfile(Collection):
     def __getitem__(self, strat):
         if not isinstance(strat, int):
             return Collection.__getitem__(self, strat)
-        cdef c_ArrayInt num_strategies
+        cdef Array[int] num_strategies
         cdef Strategy s
         num_strategies = self.support.NumStrategies()
         for i in range(1,num_strategies.Length()+1):
@@ -102,13 +102,13 @@ cdef class StrategySupportProfile(Collection):
     def restrict(self):
         cdef StrategicRestriction restriction
         restriction = StrategicRestriction()
-        restriction.support = copy_StrategySupport(deref(self.support))
+        restriction.support = new c_StrategySupport(deref(self.support))
         return restriction
 
     def undominated(self, strict=False, external=False):
         cdef StrategicRestriction restriction
         restriction = StrategicRestriction()
-        restriction.support = copy_StrategySupport(self.support.Undominated(strict, external))
+        restriction.support = new c_StrategySupport(self.support.Undominated(strict, external))
         new_profile = StrategySupportProfile(restriction.strategies, self.game)
         return new_profile 
 
@@ -155,7 +155,7 @@ cdef class RestrictionStrategies(Collection):
     def __getitem__(self, strat):
         if not isinstance(strat, int):
             return Collection.__getitem__(self, strat)
-        cdef c_ArrayInt num_strategies
+        cdef Array[int] num_strategies
         cdef Strategy s
         num_strategies = self.restriction.support.NumStrategies()
         for i in range(1,num_strategies.Length()+1):
@@ -178,7 +178,7 @@ cdef class StrategicRestriction(BaseGame):
         self.support = (<c_StrategySupport *>0)
     def __dealloc__(self):
         if self.support != (<c_StrategySupport *>0):
-            del_StrategySupport(self.support)
+            del self.support
     def __repr__(self):
         return "<StrategicRestriction of Game '%s'>" % self.title
 
@@ -233,10 +233,18 @@ cdef class StrategicRestriction(BaseGame):
         def __get__(self):
             return self.unrestrict().is_perfect_recall
 
+    property min_payoff:
+        def __get__(self):
+            return self.unrestrict().min_payoff
+
+    property max_payoff:
+        def __get__(self):
+            return self.unrestrict().max_payoff
+
     def undominated(self, strict=False):
         cdef StrategicRestriction new_restriction
         new_restriction = StrategicRestriction()
-        new_restriction.support = copy_StrategySupport(self.support.Undominated(strict, False))
+        new_restriction.support = new c_StrategySupport(self.support.Undominated(strict, False))
         return new_restriction
 
     def num_strategies_player(self, pl):
@@ -250,3 +258,65 @@ cdef class StrategicRestriction(BaseGame):
         g = Game()
         g.game = self.support.GetGame()
         return g
+
+    ###
+    # Methods below here have been borrowed from the basic Game
+    # implementation, and may not be fully correct in handling
+    # all cases
+    ###
+
+    def _get_contingency(self, *args):
+        cdef c_PureStrategyProfile *psp
+        cdef Outcome outcome
+        psp = new c_PureStrategyProfile(deref(self.support).GetGame().deref().NewPureStrategyProfile())
+        
+        
+        for (pl, st) in enumerate(args):
+            psp.deref().SetStrategy(deref(self.support).GetStrategy(pl+1, st+1))
+
+        outcome = Outcome()
+        outcome.outcome = psp.deref().GetOutcome()
+        del psp
+        return outcome
+
+    # As of Cython 0.11.2, cython does not support the * notation for the argument
+    # to __getitem__, which is required for multidimensional slicing to work. 
+    # We work around this by providing a shim.
+    def __getitem__(self, i):
+        try:
+            if len(i) != len(self.players):
+                raise KeyError, "Number of strategies is not equal to the number of players"
+        except TypeError:
+            raise TypeError, "contingency must be a tuple-like object"
+        cont = [ 0 ] * len(self.players)
+        for (pl, st) in enumerate(i):
+            if isinstance(st, int):
+                if st < 0 or st >= len(self.players[pl].strategies):
+                    raise IndexError, "Provided strategy index %d out of range for player %d" % (st, pl)
+                cont[pl] = st
+            elif isinstance(st, str):
+                try:
+                    cont[pl] = [ s.label for s in self.players[pl].strategies ].index(st)
+                except ValueError:
+                    raise IndexError, "Provided strategy label '%s' not defined" % st
+            elif isinstance(st, Strategy):
+                try:
+                    cont[pl] = list(self.players[pl].strategies).index(st)
+                except ValueError:
+                    raise IndexError, "Provided strategy '%s' not available to player" % st
+            else:
+                raise TypeError("Must use a tuple of ints, strategy labels, or strategies")
+        return self._get_contingency(*tuple(cont))
+
+    def mixed_profile(self, rational=False):
+        cdef MixedStrategyProfileDouble mspd
+        cdef MixedStrategyProfileRational mspr
+        cdef c_Rational dummy_rat
+        if not rational:
+            mspd = MixedStrategyProfileDouble()
+            mspd.profile = new c_MixedStrategyProfileDouble(deref(self.support).NewMixedStrategyProfileDouble())
+            return mspd
+        else:
+            mspr = MixedStrategyProfileRational()
+            mspr.profile = new c_MixedStrategyProfileRational(deref(self.support).NewMixedStrategyProfileRational())
+            return mspr
